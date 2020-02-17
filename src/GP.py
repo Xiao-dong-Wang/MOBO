@@ -8,9 +8,8 @@ import sys
 # A conventional gaussian process class for bayesian optimization
 class GP:
     # Initialize GP class
-    # train_x shape: (dim, num_train);   train_y shape: (num_train, ) 
-    def __init__(self, dataset, bfgs_iter=100, debug=True, k=0):
-        self.k = k
+    # train_x shape: (dim, num_train);   train_y shape: (1, num_train) 
+    def __init__(self, dataset, bfgs_iter=100, debug=True):
         self.train_x = dataset['train_x']
         self.train_y = dataset['train_y']
         self.bfgs_iter = bfgs_iter
@@ -18,56 +17,33 @@ class GP:
         self.dim = self.train_x.shape[0]
         self.num_train = self.train_x.shape[1]
         self.normalize()
-        self.idx1 = [self.dim-1]
-        self.idx2 = np.arange(self.dim-1)
+        self.jitter = 1e-9
 
     # Normalize y
     def normalize(self):
-        self.train_y = self.train_y.reshape(-1)
         self.mean = self.train_y.mean()
-        self.std = self.train_y.std()
+        self.std = self.train_y.std() + 0.000001
         self.train_y = (self.train_y - self.mean)/self.std
 
     # Initialize hyper_parameters
     def get_default_theta(self):
-        if self.k: # kernel2 MF
-            theta = np.random.randn(3 + 2*self.dim)
-            theta[2] = np.maximum(-100, np.log(0.5*(self.train_x[self.dim-1].max() - self.train_x[self.dim-1].min())))
-            for i in range(self.dim-1):
-                tmp = np.maximum(-100, np.log(0.5*(self.train_x[i].max() - self.train_x[i].min())))
-                theta[4+i] = tmp
-                theta[4+self.dim+i] = tmp
-        else: # kernel1 RBF
-            theta = np.random.randn(2 + self.dim)
-            for i in range(self.dim):
-                theta[2+i] = np.maximum(-100, np.log(0.5*(self.train_x[i].max() - self.train_x[i].min())))
+        # sn2, output_scale, length_scale
+        theta = np.random.randn(2 + self.dim)
+        for i in range(self.dim):
+            theta[2+i] = np.maximum(-100, np.log(0.5*(self.train_x[i].max() - self.train_x[i].min())))
         theta[0] = np.log(np.std(self.train_y)) # sn2
         return theta
 
     # Rbf kernel
-    def kernel1(self, x, xp, hyp):
-        output_scale = np.exp(hyp[0])
-        lengthscales = np.exp(hyp[1:]) + 0.000001
+    def kernel(self, x, xp, theta):
+        output_scale = np.exp(theta[1])
+        lengthscales = np.exp(theta[2:]) + 0.000001
         diffs = np.expand_dims((x.T/lengthscales).T, 2) - np.expand_dims((xp.T/lengthscales).T, 1)
         return output_scale * np.exp(-0.5*np.sum(diffs**2, axis=0))
     
-    # MF kernel
-    def kernel2(self, x, xp, hyp):
-        hyp_f = hyp[:2]
-        hyp_rho = hyp[2:2+self.dim]
-        hyp_delta = hyp[2+self.dim:]
-        return self.kernel1(x[self.idx1], xp[self.idx1], hyp_f) * self.kernel1(x[self.idx2], xp[self.idx2], hyp_rho) + self.kernel1(x[self.idx2], xp[self.idx2], hyp_delta)
-
-    def kernel(self, x, xp, hyp):
-        if self.k: 
-            return self.kernel2(x, xp, hyp)
-        else:
-            return self.kernel1(x, xp, hyp)
-        
     def neg_log_likelihood(self, theta):
         sn2 = np.exp(theta[0])
-        hyp = theta[1:]
-        K = self.kernel(self.train_x, self.train_x, hyp) + sn2*np.eye(self.num_train)
+        K = self.kernel(self.train_x, self.train_x, theta) + sn2*np.eye(self.num_train) + self.jitter*np.eye(self.num_train)
         L = np.linalg.cholesky(K)
 
         logDetK = np.sum(np.log(np.diag(L)))
@@ -86,7 +62,6 @@ class GP:
         self.theta = np.copy(theta0)
 
         nlz = self.neg_log_likelihood(theta0)
-        print('nlz before GP training: ', self.nlz)
 
         def loss(theta):
             nlz = self.neg_log_likelihood(theta)
@@ -117,34 +92,29 @@ class GP:
                 print(traceback.format_exc())
 
         if(np.isinf(self.loss) or np.isnan(self.loss)):
-            print('GP. Fail to build GP model')
+            print('GP. Failed to build GP model')
             sys.exit(1)
 
-        print('nlz after training: ', self.nlz)
 
         sn2 = np.exp(self.theta[0])
-        hyp = self.theta[1:]
-        K = self.kernel(self.train_x, self.train_x, hyp) + sn2 * np.eye(self.num_train)
+        K = self.kernel(self.train_x, self.train_x, self.theta) + sn2 * np.eye(self.num_train) + self.jitter*np.eye(self.num_train)
         self.L = np.linalg.cholesky(K)
         self.alpha = chol_inv(self.L, self.train_y.T)
-        if self.k:
-            self.for_diag = np.exp(self.theta[1]) * np.exp(self.theta[3]) + np.exp(self.theta[3+self.dim])
-        else:
-            self.for_diag = np.exp(self.theta[1])
+        self.for_diag = np.exp(self.theta[1])
         print('GP. GP model training process finished')
 
     def predict(self, test_x, is_diag=1):
         sn2 = np.exp(self.theta[0])
-        hyp = self.theta[1:]
-        K_star = self.kernel(test_x, self.train_x, hyp)
+        K_star = self.kernel(test_x, self.train_x, self.theta)
         py = np.dot(K_star, self.alpha)
         KvKs = chol_inv(self.L, K_star.T)
         if is_diag:
             ps2 = self.for_diag + sn2 - (K_star * KvKs.T).sum(axis=1)
         else:
-            ps2 = sn2 - np.dot(K_star, KvKs) + self.kernel(test_x, test_x, hyp)
+            ps2 = sn2 - np.dot(K_star, KvKs) + self.kernel(test_x, test_x, self.theta)
         ps2 = np.abs(ps2)
         py = py * self.std + self.mean
+        py = py.reshape(-1)
         ps2 = ps2 * (self.std**2)
         return py, ps2
     
