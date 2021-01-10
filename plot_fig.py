@@ -44,12 +44,15 @@ y1 = np.linspace(0,1,1000)
 y2 = 1- np.sqrt(y1)
 
 plt.figure()
-plt.plot(PF[0], PF[1], 'bo', markersize=4.5,label='sampled data')
-plt.plot(y1, y2, 'r-', linewidth=2, label='real pareto front')
+plt.rc('font', family='serif', size=12)
+plt.plot(PF[0], PF[1], 'bo', markersize=4.5,label='Sampled points')
+plt.plot(y1, y2, 'r-', linewidth=2, label='True Pareto front')
 plt.legend()
+plt.xlabel('f1')
+plt.ylabel('f2')
 
 ax = plt.gca()
 ax.set_xlim([0, 1])
-ax.set_ylim([0, 5])
+ax.set_ylim([0, 3])
 
 plt.show()
